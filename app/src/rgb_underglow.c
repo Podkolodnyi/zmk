@@ -13,12 +13,11 @@
 #include <stdlib.h>
 
 #include <zephyr/logging/log.h>
-
 #include <zephyr/drivers/led_strip.h>
+
 #include <drivers/ext_power.h>
 
 #include <zmk/rgb_underglow.h>
-
 #include <zmk/activity.h>
 #include <zmk/usb.h>
 #include <zmk/event_manager.h>
@@ -30,9 +29,7 @@
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
 #if !DT_HAS_CHOSEN(zmk_underglow)
-
 #error "A zmk,underglow chosen node must be declared"
-
 #endif
 
 #define STRIP_CHOSEN DT_CHOSEN(zmk_underglow)
@@ -45,11 +42,27 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #define MAX_HITS 8
 #define NO_LED_INDEX 0xFF
 
-BUILD_ASSERT(CONFIG_ZMK_RGB_UNDERGLOW_BRT_MIN <= CONFIG_ZMK_RGB_UNDERGLOW_BRT_MAX,
-             "ERROR: RGB underglow maximum brightness is less than minimum brightness");
+/*
+ * Глобальные LED Charybdis:
+ *
+ * left  = 0..28
+ * right = 29..55
+ *
+ * В ZMK каждая половина видит локальный pixels[]:
+ *
+ * left  pixels[0..28]
+ * right pixels[0..26]
+ */
+#define LED_INDEX_OFFSET ((STRIP_NUM_PIXELS == 27) ? 29 : 0)
 
-BUILD_ASSERT(STRIP_NUM_PIXELS >= 56,
-             "Charybdis RGB underglow requires at least 56 LEDs");
+BUILD_ASSERT(
+    STRIP_NUM_PIXELS == 29 || STRIP_NUM_PIXELS == 27,
+    "Charybdis RGB underglow requires 29 LEDs on left or 27 LEDs on right");
+
+BUILD_ASSERT(
+    CONFIG_ZMK_RGB_UNDERGLOW_BRT_MIN <=
+        CONFIG_ZMK_RGB_UNDERGLOW_BRT_MAX,
+    "RGB underglow maximum brightness is less than minimum brightness");
 
 enum rgb_underglow_effect {
     UNDERGLOW_EFFECT_SOLID,
@@ -99,12 +112,7 @@ static const struct device *const ext_power =
 #endif
 
 /*
- * Реальные координаты физических LED.
- *
- * Индексы 56 и 57 из QMK не используются:
- * это fake LEDs, добавленные QMK только для тестирования.
- *
- * Реальные LED: 0..55.
+ * Глобальные координаты LED из QMK g_led_config.
  */
 static const struct rgb_point led_points[56] = {
     /* Left split */
@@ -183,78 +191,72 @@ static const struct rgb_point led_points[56] = {
 };
 
 /*
- * Соответствие position_state_changed.position к LED index.
+ * Порядок position взят из charybdis.json.
  *
- * Порядок position взят из layout в charybdis.json:
- *
- *   0..5   — left row 0
- *   6..11  — right row 0
- *   12..17 — left row 1
- *   18..23 — right row 1
- *   24..29 — left row 2
- *   30..35 — right row 2
- *   36..41 — left row 3
- *   42..47 — right row 3
- *   48..50 — left thumb upper
- *   51..52 — right thumb upper
- *   53..54 — left thumb lower
- *   55     — right thumb lower
+ * position 0..55 -> глобальный LED index.
  */
 static const uint8_t position_to_led[56] = {
-    /* position 0..5 — left row 0 */
+    /* Left row 0 */
     23, 16, 15, 8, 7, 0,
 
-    /* position 6..11 — right row 0 */
+    /* Right row 0 */
     52, 45, 44, 37, 36, 29,
 
-    /* position 12..17 — left row 1 */
+    /* Left row 1 */
     22, 17, 14, 9, 6, 1,
 
-    /* position 18..23 — right row 1 */
+    /* Right row 1 */
     51, 46, 43, 38, 35, 30,
 
-    /* position 24..29 — left row 2 */
+    /* Left row 2 */
     21, 18, 13, 10, 5, 2,
 
-    /* position 30..35 — right row 2 */
+    /* Right row 2 */
     50, 47, 42, 39, 34, 31,
 
-    /* position 36..41 — left row 3 */
+    /* Left row 3 */
     20, 19, 12, 11, 4, 3,
 
-    /* position 42..47 — right row 3 */
+    /* Right row 3 */
     49, 48, 41, 40, 33, 32,
 
-    /* position 48..50 — left thumb upper */
+    /* Left thumb upper */
     26, 25, 24,
 
-    /* position 51..52 — right thumb upper */
+    /* Right thumb upper */
     53, 54,
 
-    /* position 53..54 — left thumb lower */
+    /* Left thumb lower */
     28, 27,
 
-    /* position 55 — right thumb lower */
+    /* Right thumb lower */
     55,
 };
 
-static struct zmk_led_hsb hsb_scale_min_max(struct zmk_led_hsb hsb) {
-    hsb.b = CONFIG_ZMK_RGB_UNDERGLOW_BRT_MIN +
-            (CONFIG_ZMK_RGB_UNDERGLOW_BRT_MAX -
-             CONFIG_ZMK_RGB_UNDERGLOW_BRT_MIN) *
-                hsb.b / BRT_MAX;
-
-    return hsb;
-}
-
-static struct zmk_led_hsb hsb_scale_zero_max(struct zmk_led_hsb hsb) {
+static struct zmk_led_hsb hsb_scale_min_max(
+    struct zmk_led_hsb hsb) {
     hsb.b =
-        hsb.b * CONFIG_ZMK_RGB_UNDERGLOW_BRT_MAX / BRT_MAX;
+        CONFIG_ZMK_RGB_UNDERGLOW_BRT_MIN +
+        (CONFIG_ZMK_RGB_UNDERGLOW_BRT_MAX -
+         CONFIG_ZMK_RGB_UNDERGLOW_BRT_MIN) *
+            hsb.b /
+            BRT_MAX;
 
     return hsb;
 }
 
-static struct led_rgb hsb_to_rgb(struct zmk_led_hsb hsb) {
+static struct zmk_led_hsb hsb_scale_zero_max(
+    struct zmk_led_hsb hsb) {
+    hsb.b =
+        hsb.b *
+        CONFIG_ZMK_RGB_UNDERGLOW_BRT_MAX /
+        BRT_MAX;
+
+    return hsb;
+}
+
+static struct led_rgb hsb_to_rgb(
+    struct zmk_led_hsb hsb) {
     float r = 0;
     float g = 0;
     float b = 0;
@@ -264,7 +266,8 @@ static struct led_rgb hsb_to_rgb(struct zmk_led_hsb hsb) {
     float v = hsb.b / ((float)BRT_MAX);
     float s = hsb.s / ((float)SAT_MAX);
 
-    float f = hsb.h / ((float)HUE_MAX) * 6 - i;
+    float f =
+        hsb.h / ((float)HUE_MAX) * 6 - i;
 
     float p = v * (1 - s);
     float q = v * (1 - f * s);
@@ -308,42 +311,48 @@ static struct led_rgb hsb_to_rgb(struct zmk_led_hsb hsb) {
         break;
     }
 
-    struct led_rgb rgb = {
+    return (struct led_rgb){
         .r = r * 255,
         .g = g * 255,
         .b = b * 255,
     };
-
-    return rgb;
 }
 
 static void rgb_underglow_clear_hits(void) {
     last_hit_tracker.count = 0;
 
     for (int i = 0; i < MAX_HITS; i++) {
-        last_hit_tracker.hits[i] = (struct rgb_hit){
-            .point = {0, 0},
-            .tick = 0,
-        };
+        last_hit_tracker.hits[i] =
+            (struct rgb_hit){
+                .point = {0, 0},
+                .tick = 0,
+            };
     }
 }
 
-static void rgb_underglow_register_hit(uint32_t position) {
+static void rgb_underglow_register_hit(
+    uint32_t position) {
     if (position >= ARRAY_SIZE(position_to_led)) {
         return;
     }
 
-    uint8_t led_index = position_to_led[position];
+    uint8_t global_led_index =
+        position_to_led[position];
 
-    if (led_index == NO_LED_INDEX) {
+    if (global_led_index == NO_LED_INDEX) {
         return;
     }
 
-    if (led_index >= 56) {
+    if (global_led_index >= 56) {
         return;
     }
 
-    if (led_index >= STRIP_NUM_PIXELS) {
+    /*
+     * Каждая половина обрабатывает только свои LED.
+     */
+    if (global_led_index < LED_INDEX_OFFSET ||
+        global_led_index >=
+            LED_INDEX_OFFSET + STRIP_NUM_PIXELS) {
         return;
     }
 
@@ -352,74 +361,61 @@ static void rgb_underglow_register_hit(uint32_t position) {
             last_hit_tracker.hits[i - 1];
     }
 
-    last_hit_tracker.hits[0].point = led_points[led_index];
-    last_hit_tracker.hits[0].tick = state.animation_step;
+    last_hit_tracker.hits[0].point =
+        led_points[global_led_index];
+
+    last_hit_tracker.hits[0].tick =
+        state.animation_step;
 
     if (last_hit_tracker.count < MAX_HITS) {
         last_hit_tracker.count++;
     }
 
-    LOG_DBG("RGB hit: position=%u led=%u x=%d y=%d",
-            position,
-            led_index,
-            led_points[led_index].x,
-            led_points[led_index].y);
+    LOG_DBG(
+        "RGB hit: position=%u global_led=%u local_led=%u x=%d y=%d",
+        position,
+        global_led_index,
+        global_led_index - LED_INDEX_OFFSET,
+        led_points[global_led_index].x,
+        led_points[global_led_index].y);
 }
 
-/*
- * Общая база для трёх пользовательских эффектов:
- *
- * DEFAULT_ANIM:
- *   базовый цвет + волна от нажатий.
- *
- * GAME_ANIM:
- *   красный цвет + волна от нажатий.
- *
- * GAY_ANIM:
- *   радуга по физической координате X + волна от нажатий.
- */
-static void zmk_rgb_underglow_effect_default_core(bool red_mode,
-                                                   bool gay_mode) {
+static void zmk_rgb_underglow_effect_default_core(
+    bool red_mode,
+    bool gay_mode) {
     uint16_t step = state.animation_step;
 
     for (int i = 0; i < STRIP_NUM_PIXELS; i++) {
-        struct zmk_led_hsb hsb = state.color;
+        int global_led_index =
+            LED_INDEX_OFFSET + i;
 
+        struct zmk_led_hsb hsb = state.color;
         uint16_t wave_brightness = 0;
 
-        /*
-         * Суммируем вклад от последних нажатий.
-         */
-        for (uint8_t j = 0; j < last_hit_tracker.count; j++) {
+        for (uint8_t j = 0;
+             j < last_hit_tracker.count;
+             j++) {
             int16_t dx =
-                led_points[i].x -
+                led_points[global_led_index].x -
                 last_hit_tracker.hits[j].point.x;
 
             int16_t dy =
-                led_points[i].y -
+                led_points[global_led_index].y -
                 last_hit_tracker.hits[j].point.y;
 
-            uint16_t distance = (uint16_t)sqrtf(
-                (float)(dx * dx + dy * dy));
+            uint16_t distance =
+                (uint16_t)sqrtf(
+                    (float)(dx * dx + dy * dy));
 
             uint16_t age =
-                (uint16_t)(step -
-                            last_hit_tracker.hits[j].tick);
+                (uint16_t)(
+                    step -
+                    last_hit_tracker.hits[j].tick);
 
-            /*
-             * Старые волны удаляем.
-             *
-             * При таймере 50 мс и speed=1:
-             * 255 шагов — примерно 2.5 секунды.
-             */
             if (age > 255) {
                 continue;
             }
 
-            /*
-             * Чем меньше distance и age,
-             * тем ярче этот LED.
-             */
             int effect =
                 255 -
                 ((int)age * 3) -
@@ -430,90 +426,88 @@ static void zmk_rgb_underglow_effect_default_core(bool red_mode,
             }
 
             wave_brightness =
-                MIN(255, wave_brightness + effect);
+                MIN(255,
+                    wave_brightness + effect);
         }
 
         uint8_t base_brightness =
-            (uint8_t)((hsb.b * 255) / BRT_MAX);
+            (uint8_t)(
+                (hsb.b * 255) /
+                BRT_MAX);
 
-        /*
-         * Используем MAX, а не простое сложение.
-         * Иначе при базовой яркости 100% волна
-         * всегда упиралась бы в значение 255.
-         */
         uint8_t final_brightness =
             MAX(base_brightness,
                 (uint8_t)wave_brightness);
 
         if (!gay_mode) {
             if (red_mode) {
-                /*
-                 * GAME_ANIM:
-                 * чисто красная волна.
-                 */
                 hsb.h = 0;
                 hsb.s = SAT_MAX;
                 hsb.b =
-                    (final_brightness * BRT_MAX) / 255;
+                    (final_brightness *
+                     BRT_MAX) /
+                    255;
             } else {
-                /*
-                 * DEFAULT_ANIM:
-                 * волна базового цвета.
-                 */
                 hsb.b =
-                    (final_brightness * BRT_MAX) / 255;
+                    (final_brightness *
+                     BRT_MAX) /
+                    255;
             }
         } else {
-            /*
-             * GAY_ANIM:
-             * радуга распределена по физической
-             * координате X.
-             *
-             * Диапазон X в QMK: 0..224.
-             */
             hsb.h =
                 (uint16_t)(
-                    ((led_points[i].x * HUE_MAX) / 224 +
+                    ((led_points[global_led_index].x *
+                      HUE_MAX) /
+                     224 +
                      step) %
                     HUE_MAX);
 
-            hsb.s = MIN(
-                SAT_MAX,
-                hsb.s + (wave_brightness / 4));
+            hsb.s =
+                MIN(SAT_MAX,
+                    hsb.s +
+                        (wave_brightness / 4));
 
-            hsb.b = MAX(
-                hsb.b,
-                (uint8_t)(
-                    (wave_brightness * BRT_MAX) / 255));
+            hsb.b =
+                MAX(
+                    hsb.b,
+                    (uint8_t)(
+                        (wave_brightness *
+                         BRT_MAX) /
+                        255));
 
             hsb.b = MIN(BRT_MAX, hsb.b);
         }
 
         pixels[i] =
-            hsb_to_rgb(hsb_scale_min_max(hsb));
+            hsb_to_rgb(
+                hsb_scale_min_max(hsb));
     }
 
-    state.animation_step += state.animation_speed;
+    state.animation_step +=
+        state.animation_speed;
 }
 
-/* Стандартный эффект: постоянный цвет */
 static void zmk_rgb_underglow_effect_solid(void) {
+    struct led_rgb color =
+        hsb_to_rgb(
+            hsb_scale_min_max(state.color));
+
     for (int i = 0; i < STRIP_NUM_PIXELS; i++) {
-        pixels[i] =
-            hsb_to_rgb(hsb_scale_min_max(state.color));
+        pixels[i] = color;
     }
 }
 
-/* Стандартный эффект: дыхание */
 static void zmk_rgb_underglow_effect_breathe(void) {
     for (int i = 0; i < STRIP_NUM_PIXELS; i++) {
         struct zmk_led_hsb hsb = state.color;
 
         hsb.b =
-            abs(state.animation_step - 1200) / 12;
+            abs(state.animation_step - 1200) /
+            12;
 
         pixels[i] =
-            hsb_to_rgb(hsb_scale_zero_max(hsb));
+            hsb_to_rgb(
+                hsb_scale_zero_max(hsb));
     }
 
     state.animation_step +=
@@ -524,7 +518,6 @@ static void zmk_rgb_underglow_effect_breathe(void) {
     }
 }
 
-/* Стандартный эффект: spectrum */
 static void zmk_rgb_underglow_effect_spectrum(void) {
     for (int i = 0; i < STRIP_NUM_PIXELS; i++) {
         struct zmk_led_hsb hsb = state.color;
@@ -532,14 +525,16 @@ static void zmk_rgb_underglow_effect_spectrum(void) {
         hsb.h = state.animation_step;
 
         pixels[i] =
-            hsb_to_rgb(hsb_scale_min_max(hsb));
+            hsb_to_rgb(
+                hsb_scale_min_max(hsb));
     }
 
-    state.animation_step += state.animation_speed;
+    state.animation_step +=
+        state.animation_speed;
+
     state.animation_step %= HUE_MAX;
 }
 
-/* Стандартный эффект: swirl */
 static void zmk_rgb_underglow_effect_swirl(void) {
     for (int i = 0; i < STRIP_NUM_PIXELS; i++) {
         struct zmk_led_hsb hsb = state.color;
@@ -550,7 +545,8 @@ static void zmk_rgb_underglow_effect_swirl(void) {
             HUE_MAX;
 
         pixels[i] =
-            hsb_to_rgb(hsb_scale_min_max(hsb));
+            hsb_to_rgb(
+                hsb_scale_min_max(hsb));
     }
 
     state.animation_step +=
@@ -558,8 +554,6 @@ static void zmk_rgb_underglow_effect_swirl(void) {
 
     state.animation_step %= HUE_MAX;
 }
-
-/* Пользовательские эффекты */
 
 static void zmk_rgb_underglow_effect_default_anim(void) {
     zmk_rgb_underglow_effect_default_core(
@@ -579,7 +573,8 @@ static void zmk_rgb_underglow_effect_gay_anim(void) {
         true);
 }
 
-static void zmk_rgb_underglow_tick(struct k_work *work) {
+static void zmk_rgb_underglow_tick(
+    struct k_work *work) {
     ARG_UNUSED(work);
 
     switch (state.current_effect) {
@@ -624,7 +619,7 @@ static void zmk_rgb_underglow_tick(struct k_work *work) {
 
     if (err < 0) {
         LOG_ERR(
-            "Failed to update the RGB strip (%d)",
+            "Failed to update RGB strip: %d",
             err);
     }
 }
@@ -702,8 +697,8 @@ SETTINGS_STATIC_HANDLER_DEFINE(
     NULL);
 
 static void zmk_rgb_underglow_save_state_work(
-    struct k_work *_work) {
-    ARG_UNUSED(_work);
+    struct k_work *work) {
+    ARG_UNUSED(work);
 
     settings_save_one(
         "rgb/underglow/state",
@@ -802,7 +797,8 @@ int zmk_rgb_underglow_save_state(void) {
 #endif
 }
 
-int zmk_rgb_underglow_get_state(bool *on_off) {
+int zmk_rgb_underglow_get_state(
+    bool *on_off) {
     if (!led_strip) {
         return -ENODEV;
     }
@@ -819,15 +815,13 @@ int zmk_rgb_underglow_on(void) {
 
 #if IS_ENABLED(CONFIG_ZMK_RGB_UNDERGLOW_EXT_POWER)
 
-    if (ext_power != NULL) {
-        int rc =
-            ext_power_enable(ext_power);
+    int rc =
+        ext_power_enable(ext_power);
 
-        if (rc != 0) {
-            LOG_ERR(
-                "Unable to enable EXT_POWER: %d",
-                rc);
-        }
+    if (rc != 0) {
+        LOG_ERR(
+            "Unable to enable EXT_POWER: %d",
+            rc);
     }
 
 #endif
@@ -880,15 +874,13 @@ int zmk_rgb_underglow_off(void) {
 
 #if IS_ENABLED(CONFIG_ZMK_RGB_UNDERGLOW_EXT_POWER)
 
-    if (ext_power != NULL) {
-        int rc =
-            ext_power_disable(ext_power);
+    int rc =
+        ext_power_disable(ext_power);
 
-        if (rc != 0) {
-            LOG_ERR(
-                "Unable to disable EXT_POWER: %d",
-                rc);
-        }
+    if (rc != 0) {
+        LOG_ERR(
+            "Unable to disable EXT_POWER: %d",
+            rc);
     }
 
 #endif
@@ -905,7 +897,8 @@ int zmk_rgb_underglow_off(void) {
     return zmk_rgb_underglow_save_state();
 }
 
-int zmk_rgb_underglow_calc_effect(int direction) {
+int zmk_rgb_underglow_calc_effect(
+    int direction) {
     return (
         state.current_effect +
         UNDERGLOW_EFFECT_NUMBER +
@@ -913,7 +906,8 @@ int zmk_rgb_underglow_calc_effect(int direction) {
         UNDERGLOW_EFFECT_NUMBER;
 }
 
-int zmk_rgb_underglow_select_effect(int effect) {
+int zmk_rgb_underglow_select_effect(
+    int effect) {
     if (!led_strip) {
         return -ENODEV;
     }
@@ -931,7 +925,8 @@ int zmk_rgb_underglow_select_effect(int effect) {
     return zmk_rgb_underglow_save_state();
 }
 
-int zmk_rgb_underglow_cycle_effect(int direction) {
+int zmk_rgb_underglow_cycle_effect(
+    int direction) {
     return zmk_rgb_underglow_select_effect(
         zmk_rgb_underglow_calc_effect(direction));
 }
@@ -978,13 +973,7 @@ struct zmk_led_hsb zmk_rgb_underglow_calc_sat(
         direction *
             CONFIG_ZMK_RGB_UNDERGLOW_SAT_STEP;
 
-    if (s < 0) {
-        s = 0;
-    } else if (s > SAT_MAX) {
-        s = SAT_MAX;
-    }
-
-    color.s = s;
+    color.s = CLAMP(s, 0, SAT_MAX);
 
     return color;
 }
@@ -1003,7 +992,8 @@ struct zmk_led_hsb zmk_rgb_underglow_calc_brt(
     return color;
 }
 
-int zmk_rgb_underglow_change_hue(int direction) {
+int zmk_rgb_underglow_change_hue(
+    int direction) {
     if (!led_strip) {
         return -ENODEV;
     }
@@ -1014,7 +1004,8 @@ int zmk_rgb_underglow_change_hue(int direction) {
     return zmk_rgb_underglow_save_state();
 }
 
-int zmk_rgb_underglow_change_sat(int direction) {
+int zmk_rgb_underglow_change_sat(
+    int direction) {
     if (!led_strip) {
         return -ENODEV;
     }
@@ -1025,7 +1016,8 @@ int zmk_rgb_underglow_change_sat(int direction) {
     return zmk_rgb_underglow_save_state();
 }
 
-int zmk_rgb_underglow_change_brt(int direction) {
+int zmk_rgb_underglow_change_brt(
+    int direction) {
     if (!led_strip) {
         return -ENODEV;
     }
@@ -1036,7 +1028,8 @@ int zmk_rgb_underglow_change_brt(int direction) {
     return zmk_rgb_underglow_save_state();
 }
 
-int zmk_rgb_underglow_change_spd(int direction) {
+int zmk_rgb_underglow_change_spd(
+    int direction) {
     if (!led_strip) {
         return -ENODEV;
     }
@@ -1056,22 +1049,14 @@ int zmk_rgb_underglow_change_spd(int direction) {
 }
 
 /*
- * Обработчик нажатий.
- *
- * position_state_changed содержит:
- *   - position — номер позиции клавиши;
- *   - state — true при нажатии, false при отпускании.
+ * Трекер нажатий клавиш.
  */
 static int rgb_underglow_key_hit_listener(
     const zmk_event_t *eh) {
     const struct zmk_position_state_changed *ev =
         as_zmk_position_state_changed(eh);
 
-    if (ev == NULL) {
-        return ZMK_EV_EVENT_BUBBLE;
-    }
-
-    if (!ev->state) {
+    if (ev == NULL || !ev->state) {
         return ZMK_EV_EVENT_BUBBLE;
     }
 
@@ -1103,10 +1088,6 @@ static int rgb_underglow_auto_state(
         .rgb_state_before_sleeping = false,
     };
 
-    /*
-     * Wake event while awake or sleep event while asleep:
-     * nothing to do.
-     */
     if (target_wake_state ==
         sleep_state.is_awake) {
         return 0;
@@ -1118,9 +1099,9 @@ static int rgb_underglow_auto_state(
     if (sleep_state.is_awake) {
         if (sleep_state.rgb_state_before_sleeping) {
             return zmk_rgb_underglow_on();
-        } else {
-            return zmk_rgb_underglow_off();
         }
+
+        return zmk_rgb_underglow_off();
     }
 
     sleep_state.rgb_state_before_sleeping =
