@@ -136,7 +136,6 @@ static void rgb_underglow_register_hit(uint32_t position) {
     if (position >= ARRAY_SIZE(position_to_led)) return;
     uint8_t global = position_to_led[position];
     if (global == NO_LED_INDEX || global >= 56) return;
-    if (global < LED_INDEX_OFFSET || global >= LED_INDEX_OFFSET + STRIP_NUM_PIXELS) return;
 
     for (int i=MAX_HITS-1; i>0; i--) last_hit_tracker.hits[i] = last_hit_tracker.hits[i-1];
     last_hit_tracker.hits[0].point = led_points[global];
